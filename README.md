@@ -1,20 +1,68 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# BookBridge
 
-# Run and deploy your AI Studio app
+**BookBridge – Your Digital Library, Buying, Borrowing and Book Exchange Platform**
 
-This contains everything you need to run your app locally.
+BookBridge is a digital platform designed to connect book readers, buyers, sellers and borrowers in one place.
 
-View your app in AI Studio: https://ai.studio/apps/78ff5baa-896d-4750-b83a-df3fe3f8f0dc
+## Features
+
+- Browse and explore books
+- Buy and sell books
+- Borrow and return books
+- Exchange books
+- Digital library and reading
+- Customer dashboard
+- Owner dashboard
+- Admin dashboard
+- User registration and login
+- Book management and order tracking
+
+## Technology Stack
+
+- React
+- TypeScript
+- Vite
+- Tailwind CSS
+- Express.js
+- Node.js
+- SQLite
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+### Prerequisites
+- Node.js
+- npm
 
+### Installation
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+```bash
+npm install
+```
+
+### Start development server
+
+```bash
+npm run dev
+```
+
+Open the local URL shown in your terminal.
+
+### Build for production
+
+```bash
+npm run build
+```
+
+### Start production server
+
+```bash
+npm start
+```
+
+## Project Status
+
+BookBridge is under development.
+
+---
+
+**BookBridge – Connecting People Through Books.**
