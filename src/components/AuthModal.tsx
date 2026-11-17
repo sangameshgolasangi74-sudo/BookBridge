@@ -33,28 +33,11 @@ export function AuthModal({
   const [recoverStep, setRecoverStep] = useState<'email' | 'verify'>('email');
   const [resetCode, setResetCode] = useState('');
   const [newPassword, setNewPassword] = useState('');
-  const [issuedDemoCode, setIssuedDemoCode] = useState('');
 
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   if (!open) return null;
-
-  const fillDemoCredentials = (targetRole: UserRole) => {
-    setError('');
-    setMode('login');
-    setPortalRole(targetRole);
-    if (targetRole === 'customer') {
-      setEmail('maya.lin@university.edu');
-      setPassword('Reader@2026');
-    } else if (targetRole === 'owner') {
-      setEmail('arjun.mehta@presshouse.org');
-      setPassword('Owner@2026');
-    } else {
-      setEmail('admin@bookbridge.org');
-      setPassword('AdminBridge#2026');
-    }
-  };
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,16 +96,15 @@ export function AuthModal({
     setLoading(true);
     try {
       if (recoverStep === 'email') {
-        const res = await apiRequest<{ step: string; message: string; demoVerificationCode?: string }>(
+        const res = await apiRequest<{ step: string; message: string }>(
           '/api/auth/recover-password',
           {
             method: 'POST',
             body: JSON.stringify({ email })
           }
         );
-        setIssuedDemoCode(res.demoVerificationCode || '');
         setRecoverStep('verify');
-        onNotify('Verification code ready', res.message, 'info');
+        onNotify('Check your email', res.message, 'info');
       } else {
         const res = await apiRequest<{ step: string; message: string }>('/api/auth/recover-password', {
           method: 'POST',
@@ -311,34 +293,6 @@ export function AuthModal({
                 {loading ? 'Signing In...' : `Sign In as ${portalRole === 'owner' ? 'Book Owner' : portalRole === 'admin' ? 'Administrator' : 'Customer'}`}
               </button>
 
-              <div className="pt-3 border-t border-slate-100">
-                <p className="text-[11px] font-medium text-slate-500 mb-2">
-                  Quick Demo Accounts (Autofill):
-                </p>
-                <div className="grid grid-cols-3 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => fillDemoCredentials('customer')}
-                    className="py-1.5 px-2 text-xs font-medium bg-[#F5F7FA] hover:bg-slate-200/70 text-[#142B45] rounded-md border border-slate-200"
-                  >
-                    Customer Demo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => fillDemoCredentials('owner')}
-                    className="py-1.5 px-2 text-xs font-medium bg-[#F5F7FA] hover:bg-slate-200/70 text-[#142B45] rounded-md border border-slate-200"
-                  >
-                    Owner Demo
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => fillDemoCredentials('admin')}
-                    className="py-1.5 px-2 text-xs font-medium bg-[#F5F7FA] hover:bg-slate-200/70 text-[#142B45] rounded-md border border-slate-200"
-                  >
-                    Admin Demo
-                  </button>
-                </div>
-              </div>
             </form>
           )}
 
@@ -462,18 +416,13 @@ export function AuthModal({
                   required
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="maya.lin@university.edu"
+                  placeholder="name@example.com"
                   className="w-full px-3 py-2.5 bg-[#F5F7FA] border border-slate-200 rounded-lg text-sm"
                 />
               </div>
 
               {recoverStep === 'verify' && (
                 <>
-                  {issuedDemoCode && (
-                    <div className="p-3 bg-[#19A68C]/10 border border-[#19A68C]/30 rounded-lg text-xs text-[#142B45]">
-                      Verification code issued: <strong className="font-mono-num">{issuedDemoCode}</strong>
-                    </div>
-                  )}
                   <div>
                     <label className="block text-xs font-medium text-[#142B45] mb-1">6-Digit Verification Code</label>
                     <input

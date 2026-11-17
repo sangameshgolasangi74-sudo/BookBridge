@@ -41,6 +41,10 @@ npm install
 
 ### Start development server
 
+Before the first run, set `ADMIN_EMAIL` and `ADMIN_PASSWORD` in your local `.env` file. Keep `.env` private and never commit credentials.
+
+For password-reset email, configure `SMTP_USER` and `SMTP_PASS` in `.env`. Use a Google App Password, not your Gmail login password. For Render deployments, set these values in the service's Environment settings; a local `.env` file is not deployed automatically.
+
 ```bash
 npm run dev
 ```

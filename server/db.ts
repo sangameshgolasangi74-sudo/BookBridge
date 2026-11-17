@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import Database from 'better-sqlite3';
 import crypto from 'crypto';
 import path from 'path';
@@ -52,7 +53,8 @@ export function initDatabase() {
     CREATE TABLE IF NOT EXISTS password_resets (
       email TEXT PRIMARY KEY,
       reset_code TEXT NOT NULL,
-      expires_at TEXT NOT NULL
+      expires_at TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS categories (
@@ -215,11 +217,62 @@ export function initDatabase() {
     );
   `);
 
+  const resetColumns = db.prepare('PRAGMA table_info(password_resets)').all() as { name: string }[];
+  if (!resetColumns.some((column) => column.name === 'attempt_count')) {
+    db.exec('ALTER TABLE password_resets ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0');
+  }
+
   const userCount = (db.prepare('SELECT COUNT(*) as cnt FROM users').get() as { cnt: number }).cnt;
   if (userCount === 0) {
     seedDatabase();
+  } else {
+    migrateDemoAccounts();
   }
   ensureEngineeringCatalogAndINR();
+}
+
+function migrateDemoAccounts() {
+  const demoEmails = [
+    'maya.lin@university.edu',
+    'arjun.mehta@presshouse.org',
+    'clara.vance@humanities.edu'
+  ];
+  const migrate = db.transaction(() => {
+    const legacyAdmin = db.prepare("SELECT id FROM users WHERE email = 'admin@bookbridge.org' AND role = 'admin'").get() as { id: number } | undefined;
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const adminPassword = process.env.ADMIN_PASSWORD;
+
+    if (legacyAdmin) {
+      if (!adminEmail || !adminPassword) {
+        throw new Error('Set ADMIN_EMAIL and ADMIN_PASSWORD to replace the demo administrator account.');
+      }
+
+      const conflictingUser = db.prepare('SELECT id FROM users WHERE email = ? AND id != ?').get(adminEmail, legacyAdmin.id);
+      if (conflictingUser) {
+        throw new Error('ADMIN_EMAIL is already used by another account.');
+      }
+
+      db.prepare('UPDATE users SET name = ?, email = ?, password_hash = ? WHERE id = ?').run(
+        process.env.ADMIN_NAME?.trim() || 'BookBridge Administrator',
+        adminEmail,
+        hashPassword(adminPassword),
+        legacyAdmin.id
+      );
+      db.prepare('DELETE FROM sessions WHERE user_id = ?').run(legacyAdmin.id);
+      db.prepare('DELETE FROM password_resets WHERE email IN (?, ?)').run('admin@bookbridge.org', adminEmail);
+    }
+
+    const admin = db.prepare("SELECT id FROM users WHERE role = 'admin' ORDER BY id LIMIT 1").get() as { id: number } | undefined;
+    if (!admin) return;
+
+    db.prepare(`
+      UPDATE books SET owner_id = ?, rating_avg = 0, rating_count = 0
+      WHERE owner_id IN (SELECT id FROM users WHERE email IN (?, ?, ?))
+    `).run(admin.id, ...demoEmails);
+    db.prepare('DELETE FROM complaints WHERE user_id IN (SELECT id FROM users WHERE email IN (?, ?, ?))').run(...demoEmails);
+    db.prepare('DELETE FROM users WHERE email IN (?, ?, ?)').run(...demoEmails);
+  });
+  migrate();
 }
 
 function ensureEngineeringCatalogAndINR() {
@@ -368,61 +421,28 @@ function ensureEngineeringCatalogAndINR() {
 }
 
 function seedDatabase() {
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  const adminPassword = process.env.ADMIN_PASSWORD;
+  if (!adminEmail || !adminPassword) {
+    throw new Error('Set ADMIN_EMAIL and ADMIN_PASSWORD before initializing a new BookBridge database.');
+  }
+
   const insertUser = db.prepare(`
     INSERT INTO users (name, email, password_hash, role, can_customer, can_owner, phone, address, institution, bio)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
   const adminId = insertUser.run(
-    'Dr. Elena Rostova',
-    'admin@bookbridge.org',
-    hashPassword('AdminBridge#2026'),
+    process.env.ADMIN_NAME?.trim() || 'BookBridge Administrator',
+    adminEmail,
+    hashPassword(adminPassword),
     'admin',
     1,
     1,
-    '+1 (555) 210-8800',
-    'BookBridge Central Commons, Hall 4',
-    'BookBridge Civic Library Trust',
-    'Chief Archivist and Platform Administrator.'
-  ).lastInsertRowid as number;
-
-  const mayaId = insertUser.run(
-    'Maya Lin',
-    'maya.lin@university.edu',
-    hashPassword('Reader@2026'),
-    'customer',
-    1,
-    1,
-    '+1 (555) 394-1120',
-    '420 Mercer Commons, Apt 3B',
-    'Pacific State University',
-    'Graduate fellow in Computer Systems & Environmental Policy. Active book exchanger.'
-  ).lastInsertRowid as number;
-
-  const arjunId = insertUser.run(
-    'Arjun Mehta',
-    'arjun.mehta@presshouse.org',
-    hashPassword('Owner@2026'),
-    'owner',
-    1,
-    1,
-    '+1 (555) 782-4410',
-    '18 Linden Street, Reading District',
-    'Northside Academic Bookshop',
-    'Curator of affordable university textbooks, architectural monographs, and open-access editions.'
-  ).lastInsertRowid as number;
-
-  const claraId = insertUser.run(
-    'Prof. Clara Vance',
-    'clara.vance@humanities.edu',
-    hashPassword('Reader@2026'),
-    'owner',
-    1,
-    1,
-    '+1 (555) 604-9102',
-    '88 Faculty Row, West Campus',
-    'Department of Comparative Literature',
-    'Sharing annotated literary classics and world history volumes with students.'
+    '',
+    '',
+    '',
+    'Platform Administrator.'
   ).lastInsertRowid as number;
 
   const insertCat = db.prepare('INSERT INTO categories (name, slug, description) VALUES (?, ?, ?)');
@@ -493,58 +513,58 @@ function seedDatabase() {
     }
   ]);
 
-  const b1 = insertBook.run(
-    arjunId, catCs,
+  insertBook.run(
+    adminId, catCs,
     'Algorithms & Computer Science: A Modern Approach',
     'Claire V. Chen & Liam J. Peters',
     '978-0-262-04819-4',
     'Comprehensive university hardcover covering asymptotic analysis, graph algorithms, dynamic programming, and distributed data structures. Ideal for CS undergraduates and technical interviews.',
     'Like New', 34.50, 4.00, 1, 1, 1, 1, algoChapters,
-    'cover_algorithms', 4, 'available', 4.8, 2
-  ).lastInsertRowid as number;
+    'cover_algorithms', 4, 'available', 0, 0
+  );
 
-  const b2 = insertBook.run(
-    claraId, catLit,
+  insertBook.run(
+    adminId, catLit,
     'The Silent Tides',
     'Clara Vance',
     '978-1-594-20912-3',
     'Clothbound literary novel exploring coastal community archives, generational memory, and shared public reading rooms. Includes open-access digital reading preview.',
     'New', 22.00, 2.50, 1, 1, 1, 1, silentTidesChapters,
-    'cover_literature', 3, 'available', 4.9, 2
-  ).lastInsertRowid as number;
+    'cover_literature', 3, 'available', 0, 0
+  );
 
-  const b3 = insertBook.run(
-    arjunId, catArch,
+  insertBook.run(
+    adminId, catArch,
     'Form & Grid: Architectural Monograph',
     'Alexandra Chen',
     '978-0-714-87421-0',
     'Architectural monograph examining civic timber libraries, daylighting geometry, modular masonry, and human-scale spatial grids across 24 public buildings.',
     'Like New', 42.00, 5.00, 1, 1, 1, 0, '[]',
-    'cover_architecture', 2, 'available', 4.7, 1
-  ).lastInsertRowid as number;
+    'cover_architecture', 2, 'available', 0, 0
+  );
 
-  const b4 = insertBook.run(
-    arjunId, catSci,
+  insertBook.run(
+    adminId, catSci,
     'Earth & Environmental Science: Fundamentals and Systems',
     'Sarah L. Chen & David R. Miller',
     '978-0-134-55821-9',
     'Illustrated university textbook covering biogeochemical cycles, watershed hydrology, climate modeling, and sustainable resource stewardship. Open digital edition included.',
     'Good', 28.00, 3.00, 1, 1, 1, 1, earthChapters,
-    'cover_science', 5, 'available', 4.6, 1
-  ).lastInsertRowid as number;
+    'cover_science', 5, 'available', 0, 0
+  );
 
-  const b5 = insertBook.run(
-    claraId, catHist,
+  insertBook.run(
+    adminId, catHist,
     'World History: An Archival Chronicle (Vol. I)',
     'Dr. Marcus Thorne',
     '978-0-199-68412-7',
     'Archival clothbound volume tracing early civic assemblies, maritime trade networks, and manuscript preservation traditions across Eurasia and North Africa.',
     'Good', 31.00, 3.50, 1, 1, 1, 0, '[]',
-    'cover_history', 2, 'available', 4.8, 1
-  ).lastInsertRowid as number;
+    'cover_history', 2, 'available', 0, 0
+  );
 
-  const b6 = insertBook.run(
-    arjunId, catOpen,
+  insertBook.run(
+    adminId, catOpen,
     'Open Systems & Civic Knowledge Commons',
     'Hanna Lindqvist',
     '978-1-908-41200-5',
@@ -565,98 +585,28 @@ function seedDatabase() {
         ]
       }
     ]),
-    'cover_architecture', 10, 'available', 5.0, 1
-  ).lastInsertRowid as number;
+    'cover_architecture', 10, 'available', 0, 0
+  );
 
-  const b7 = insertBook.run(
-    mayaId, catCs,
+  insertBook.run(
+    adminId, catCs,
     'Distributed Systems in Practice (3rd Edition)',
     'Martin K. Halvorsen',
     '978-1-491-90309-4',
     'Clean gently highlighted copy used during Fall Systems Seminar. Happy to swap for an Architecture monograph or sell at student discount.',
     'Good', 26.50, 3.00, 1, 1, 1, 0, '[]',
-    'cover_algorithms', 1, 'available', 4.5, 0
-  ).lastInsertRowid as number;
+    'cover_algorithms', 1, 'available', 0, 0
+  );
 
-  const b8 = insertBook.run(
-    claraId, catLit,
+  insertBook.run(
+    adminId, catLit,
     'Selected Essays on Typography & Reading Rooms',
     'Julian Mercer',
     '978-0-879-23188-2',
     'Compact linen edition reflecting on bookbinding craft, serif legibility, and why quiet reading spaces remain essential civic anchors.',
     'Like New', 19.00, 2.00, 1, 1, 1, 0, '[]',
-    'cover_literature', 2, 'available', 4.9, 1
-  ).lastInsertRowid as number;
-
-  // Seed Orders
-  db.prepare(`
-    INSERT INTO orders (buyer_id, owner_id, book_id, quantity, total_amount, payment_method, payment_status, order_status, shipping_name, shipping_address, shipping_phone)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(mayaId, arjunId, b1, 1, 34.50, 'Card', 'paid', 'delivered', 'Maya Lin', '420 Mercer Commons, Apt 3B', '+1 (555) 394-1120');
-
-  db.prepare(`
-    INSERT INTO orders (buyer_id, owner_id, book_id, quantity, total_amount, payment_method, payment_status, order_status, shipping_name, shipping_address, shipping_phone)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(mayaId, claraId, b8, 1, 19.00, 'Campus Credit', 'paid', 'shipped', 'Maya Lin', '420 Mercer Commons, Apt 3B', '+1 (555) 394-1120');
-
-  // Seed Exchanges
-  db.prepare(`
-    INSERT INTO exchanges (requester_id, owner_id, requested_book_id, offered_book_id, offered_title, offered_condition, note, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(mayaId, arjunId, b3, b7, 'Distributed Systems in Practice (3rd Edition)', 'Good', 'Can meet at the North Campus Library Atrium this Thursday afternoon.', 'pending');
-
-  db.prepare(`
-    INSERT INTO exchanges (requester_id, owner_id, requested_book_id, offered_book_id, offered_title, offered_condition, note, status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(mayaId, claraId, b5, null, 'Modern European Constitutional History', 'Like New', 'Completed swap during semester book fair.', 'completed');
-
-  // Seed Borrowings
-  db.prepare(`
-    INSERT INTO borrowings (borrower_id, owner_id, book_id, duration_days, fee_amount, due_date, returned_at, status)
-    VALUES (?, ?, ?, ?, ?, date('now', '+9 days'), NULL, 'active')
-  `).run(mayaId, arjunId, b4, 14, 3.00);
-
-  db.prepare(`
-    INSERT INTO borrowings (borrower_id, owner_id, book_id, duration_days, fee_amount, due_date, returned_at, status)
-    VALUES (?, ?, ?, ?, ?, date('now', '-5 days'), date('now', '-6 days'), 'returned')
-  `).run(mayaId, claraId, b2, 14, 2.50);
-
-  // Seed Wishlist
-  db.prepare('INSERT INTO wishlist (user_id, book_id) VALUES (?, ?)').run(mayaId, b3);
-  db.prepare('INSERT INTO wishlist (user_id, book_id) VALUES (?, ?)').run(mayaId, b5);
-
-  // Seed Reviews
-  const insertReview = db.prepare('INSERT INTO reviews (book_id, user_id, rating, comment) VALUES (?, ?, ?, ?)');
-  insertReview.run(b1, mayaId, 5, 'Crisp diagrams and clean chapter proofs. The built-in digital preview helped me verify syllabus alignment before ordering.');
-  insertReview.run(b1, claraId, 5, 'Essential desk reference for our computational humanities lab.');
-  insertReview.run(b2, mayaId, 5, 'Beautiful clothbound edition and fast campus pickup.');
-  insertReview.run(b3, mayaId, 5, 'Architectural photography and grid drawings are remarkably clear.');
-  insertReview.run(b4, claraId, 5, 'Well-preserved copy with intact watershed maps.');
-  insertReview.run(b6, mayaId, 5, 'Incredibly helpful open-access resource for setting up our student reading circle.');
-
-  // Seed Messages
-  db.prepare('INSERT INTO messages (sender_id, receiver_id, book_id, body, is_read) VALUES (?, ?, ?, ?, ?)').run(
-    mayaId, arjunId, b3, 'Hi Arjun, is Form & Grid still available for a swap with Distributed Systems in Practice?', 0
+    'cover_literature', 2, 'available', 0, 0
   );
-  db.prepare('INSERT INTO messages (sender_id, receiver_id, book_id, body, is_read) VALUES (?, ?, ?, ?, ?)').run(
-    arjunId, mayaId, b4, 'Your 14-day borrow copy of Earth & Environmental Science is ready for pickup at Northside desk.', 1
-  );
-
-  // Seed Notifications
-  const insertNotif = db.prepare('INSERT INTO notifications (user_id, title, message, type, is_read) VALUES (?, ?, ?, ?, ?)');
-  insertNotif.run(mayaId, 'Order Shipped', 'Your order for Selected Essays on Typography & Reading Rooms is in transit.', 'order', 0);
-  insertNotif.run(mayaId, 'Borrow Due Reminder', 'Earth & Environmental Science is due back in 9 days.', 'borrow', 0);
-  insertNotif.run(arjunId, 'New Exchange Proposal', 'Maya Lin proposed swapping Distributed Systems in Practice for Form & Grid.', 'exchange', 0);
-
-  // Seed Complaints
-  db.prepare('INSERT INTO complaints (user_id, user_email, subject, details, status, admin_note) VALUES (?, ?, ?, ?, ?, ?)').run(
-    mayaId, 'maya.lin@university.edu', 'ISBN Lookup Suggestion for 2nd Editions',
-    'Could owners specify printing year alongside ISBN when listing older university editions?',
-    'investigating', 'Added printing year guidance to owner listing form; reviewing optional field.'
-  );
-
-  // Seed Digital Reading Progress
-  db.prepare('INSERT INTO digital_progress (user_id, book_id, chapter_index) VALUES (?, ?, ?)').run(mayaId, b1, 1);
 
   // Seed Site Settings
   const insertSetting = db.prepare('INSERT INTO site_settings (key, value) VALUES (?, ?)');

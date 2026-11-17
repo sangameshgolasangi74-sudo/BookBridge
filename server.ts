@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import { db, initDatabase, hashPassword, verifyPassword } from './server/db.ts';
+import { EmailConfigurationError, sendPasswordResetEmail } from './server/email.ts';
 
 initDatabase();
 
@@ -218,7 +219,7 @@ app.get('/api/auth/me', (req: AuthedRequest, res) => {
   res.json({ user: req.user || null });
 });
 
-app.post('/api/auth/recover-password', (req, res) => {
+app.post('/api/auth/recover-password', async (req, res) => {
   const { email, resetCode, newPassword } = req.body || {};
   if (!email) {
     return res.status(400).json({ error: 'Please enter your registered email address.' });
@@ -226,34 +227,72 @@ app.post('/api/auth/recover-password', (req, res) => {
   const normalizedEmail = String(email).trim().toLowerCase();
   const user = db.prepare('SELECT id, role FROM users WHERE email = ?').get(normalizedEmail) as { id: number; role: string } | undefined;
 
-  if (!user) {
-    return res.status(404).json({ error: 'No account found matching that email address.' });
-  }
-  if (user.role === 'admin') {
-    return res.status(403).json({ error: 'Administrator password resets must be performed via infrastructure CLI.' });
-  }
-
   if (!resetCode) {
-    const code = String(Math.floor(100000 + Math.random() * 900000));
-    const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
-    db.prepare('INSERT OR REPLACE INTO password_resets (email, reset_code, expires_at) VALUES (?, ?, ?)').run(normalizedEmail, code, expires);
+    if (user) {
+      const code = String(crypto.randomInt(100000, 1000000));
+      const codeHash = crypto.createHash('sha256').update(code).digest('hex');
+      const expires = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+      db.prepare(`
+        INSERT OR REPLACE INTO password_resets (email, reset_code, expires_at, attempt_count)
+        VALUES (?, ?, ?, 0)
+      `).run(normalizedEmail, codeHash, expires);
+
+      try {
+        await sendPasswordResetEmail(normalizedEmail, code);
+      } catch (error) {
+        db.prepare('DELETE FROM password_resets WHERE email = ? AND reset_code = ?').run(normalizedEmail, codeHash);
+        console.error(
+          'Password reset email delivery failed:',
+          error instanceof Error ? error.message : 'Unknown SMTP error'
+        );
+        if (error instanceof EmailConfigurationError) {
+          return res.status(503).json({
+            error: 'Email delivery is not configured. Set SMTP_USER and SMTP_PASS in .env, then restart the server.'
+          });
+        }
+        return res.status(503).json({ error: 'Unable to send a verification email right now. Please try again later.' });
+      }
+    }
+
     return res.json({
       step: 'verify',
-      message: 'A 6-digit verification code has been generated for your account.',
-      demoVerificationCode: code
+      message: 'If an account exists for that email, a verification code has been emailed. Check your inbox and spam folder.'
     });
   }
 
-  const record = db.prepare('SELECT * FROM password_resets WHERE email = ?').get(normalizedEmail) as { reset_code: string; expires_at: string } | undefined;
-  if (!record || record.reset_code !== String(resetCode).trim() || new Date(record.expires_at) < new Date()) {
+  const record = db.prepare('SELECT reset_code, expires_at, attempt_count FROM password_resets WHERE email = ?')
+    .get(normalizedEmail) as { reset_code: string; expires_at: string; attempt_count: number } | undefined;
+  if (!record || new Date(record.expires_at) < new Date() || record.attempt_count >= 5) {
+    db.prepare('DELETE FROM password_resets WHERE email = ?').run(normalizedEmail);
     return res.status(400).json({ error: 'Invalid or expired verification code.' });
   }
+
+  const providedHash = crypto.createHash('sha256').update(String(resetCode).trim()).digest();
+  const storedHash = Buffer.from(record.reset_code, 'hex');
+  const codeMatches = storedHash.length === providedHash.length && crypto.timingSafeEqual(storedHash, providedHash);
+  if (!codeMatches) {
+    if (record.attempt_count + 1 >= 5) {
+      db.prepare('DELETE FROM password_resets WHERE email = ?').run(normalizedEmail);
+    } else {
+      db.prepare('UPDATE password_resets SET attempt_count = attempt_count + 1 WHERE email = ?').run(normalizedEmail);
+    }
+    return res.status(400).json({ error: 'Invalid or expired verification code.' });
+  }
+
   if (!newPassword || String(newPassword).length < 6) {
     return res.status(400).json({ error: 'New password must be at least 6 characters.' });
   }
 
-  db.prepare('UPDATE users SET password_hash = ? WHERE email = ?').run(hashPassword(String(newPassword)), normalizedEmail);
-  db.prepare('DELETE FROM password_resets WHERE email = ?').run(normalizedEmail);
+  if (!user) {
+    return res.status(400).json({ error: 'Invalid or expired verification code.' });
+  }
+
+  const updatePassword = db.transaction(() => {
+    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hashPassword(String(newPassword)), user.id);
+    db.prepare('DELETE FROM password_resets WHERE email = ?').run(normalizedEmail);
+    db.prepare('DELETE FROM sessions WHERE user_id = ?').run(user.id);
+  });
+  updatePassword();
   res.json({ step: 'done', message: 'Password updated successfully. You may now sign in.' });
 });
 
